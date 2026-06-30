@@ -38,7 +38,8 @@ test('generated flow @sanity', async ({ page }) => {
   await expect(shipmentLink).toBeEnabled();
   await shipmentLink.click();
 
-  await page.waitForTimeout(7000);
+  await page.waitForTimeout(3000);
+  
   const newShipmentButton = page.locator('[data-testid="shipment-list-new-button"]');
   await expect(newShipmentButton).toBeVisible();
   await expect(newShipmentButton).toBeEnabled();
