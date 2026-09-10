@@ -1,8 +1,10 @@
 pipeline {
   agent any
+
   options {
     timestamps()
   }
+
   parameters {
     choice(
       name: 'EXECUTION_MODE',
@@ -19,34 +21,36 @@ pipeline {
       defaultValue: false,
       description: 'Run browser in headed mode'
     )
-    choice(
-      name: 'EXECUTION',
-      choices: ['parallel', 'sequential'],
-      description: 'parallel = multiple workers, sequential = one worker'
-    )
-    string(
-      name: 'WORKERS',
-      defaultValue: '4',
-      description: 'Number of parallel workers (only used when EXECUTION=parallel)'
-    )
     string(
       name: 'TARGET',
       defaultValue: 'regression',
       description: 'For suite mode use sanity or regression. For spec mode use a spec path like regression/test_kortis_01.spec.js'
     )
+    string(name: 'PROJECT_ID', defaultValue: '', description: 'Database project id used to resolve dynamic test-data fields')
+    string(name: 'QUALIBRIX_API_URL', defaultValue: '', description: 'Backend URL used to resolve DB-backed dynamic test data')
   }
-  stages {
-    stage('Clean Workspace') {
-      steps {
-        cleanWs()
-        checkout scm
-      }
-    }
 
+  stages {
     stage('Install') {
       steps {
         powershell 'npm ci'
         powershell 'npx playwright install'
+      }
+    }
+
+    stage('Prepare Dynamic Test Data') {
+      steps {
+        powershell '''
+          if ($env:QUALIBRIX_API_URL -and $env:PROJECT_ID -and (Test-Path "test-data.json")) {
+            $basePayload = Get-Content "test-data.json" -Raw | ConvertFrom-Json
+            $request = @{ projectId = $env:PROJECT_ID; payload = $basePayload } | ConvertTo-Json -Depth 50
+            $response = Invoke-RestMethod -Uri ($env:QUALIBRIX_API_URL.TrimEnd('/') + '/api/projects/dynamic-test-data') -Method Post -ContentType 'application/json' -Body $request
+            $response.payload | ConvertTo-Json -Depth 50 | Set-Content "test-data.json" -Encoding UTF8
+            Write-Host "Applied DB-backed dynamic test-data fields."
+          } else {
+            Write-Host "Dynamic test-data preparation skipped: required values are missing."
+          }
+        '''
       }
     }
 
@@ -55,53 +59,36 @@ pipeline {
         script {
           def headedArg = params.HEADED ? '--headed' : ''
           def browserArg = '--project=' + params.BROWSER
-          def workersArg = params.EXECUTION == 'sequential' ? '--workers=1' : '--workers=' + params.WORKERS.trim()
           def suiteTarget = params.TARGET.trim()
           def target = params.EXECUTION_MODE == 'suite'
               ? (suiteTarget == 'sanity' ? 'sanity' : 'regression')
               : suiteTarget
-          def command = 'npx playwright test "' + target + '" ' + browserArg + ' ' + workersArg
+          def command = 'npx playwright test "' + target + '" ' + browserArg
           if (headedArg) {
             command = command + ' ' + headedArg
           }
-
-          echo "==================================="
-          echo "HEADED: ${params.HEADED}"
-          echo "EXECUTION: ${params.EXECUTION}"
-          echo "WORKERS: ${params.WORKERS}"
-          echo "FINAL COMMAND: ${command}"
-          echo "==================================="
-
-          catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
-            powershell(command)
-          }
+          powershell(command)
         }
       }
     }
-
-    stage('Generate Allure Report') {
-      steps {
-        powershell '''
-          if (Test-Path "allure-results") {
-            try {
-              npx -p allure-commandline allure generate allure-results -o allure-report --clean
-              Write-Host "Allure HTML report generated."
-            } catch {
-              Write-Host "Allure generation failed: $_"
-            }
-          } else {
-            Write-Host "No allure-results directory; skipping Allure HTML generation."
-          }
-        '''
-      }
-    }
   }
+
   post {
     always {
-      archiveArtifacts(
-        artifacts: 'test-results/**, playwright-report/**, allure-results/**, allure-report/**',
-        allowEmptyArchive: true
-      )
+      archiveArtifacts artifacts: 'test-results/**, playwright-report/**, allure-results/**, allure-report/**', allowEmptyArchive: true
+      allure([
+        includeProperties: false,
+        jdk: '',
+        results: [[path: 'allure-results']]
+      ])
+      publishHTML([
+          reportDir: 'playwright-report',
+          reportFiles: 'index.html',
+          reportName: 'Playwright HTML Report',
+          keepAll: true,
+          alwaysLinkToLastBuild: true,
+          allowMissing: true
+      ])
     }
   }
 }
